@@ -1,0 +1,2 @@
+n,data_mib,chain_ms,two_way_ms,four_way_ms,pairwise_ms,speedup_two_way,speedup_four_way,speedup_pairwise,abs_diff_two_way,abs_diff_four_way,abs_diff_pairwise
+16777216,128.000000,11.204719,9.178594,6.415831,36.221038,1.220745,1.746417,0.309343,0.000000,0.000005,0.000005

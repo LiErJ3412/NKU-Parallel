@@ -1,0 +1,2 @@
+n,working_set_mib,naive_ms,optimized_ms,unroll_ms,speedup_cache,speedup_unroll,max_diff_cache,max_diff_unroll
+1024,8.015625,2.524409,0.278920,0.291470,9.050647,8.660966,0.000000,0.000000

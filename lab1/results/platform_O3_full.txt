@@ -1,0 +1,11 @@
+cpu_name,13th Gen Intel(R) Core(TM) i9-13900HX
+logical_threads,32
+total_memory_bytes,16858472448
+total_memory_human,16077.49 MiB
+cache,L1,Data,32768,64,16
+cache,L1,Data,49152,64,8
+cache,L1,Instruction,32768,64,8
+cache,L1,Instruction,65536,64,16
+cache,L2,Unified,2097152,64,8
+cache,L2,Unified,4194304,64,4
+cache,L3,Unified,37748736,64,1
