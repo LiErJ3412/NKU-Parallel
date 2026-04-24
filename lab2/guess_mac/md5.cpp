@@ -4,11 +4,71 @@
 #include <stdint.h>
 #include <cstring>
 
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#define MD5_USE_NEON 1
+#else
+#define MD5_USE_NEON 0
+#endif
+
 using namespace std;
 
 namespace
 {
 // 4x32-bit向量：每个lane对应一个不同口令，进行同构的MD5位运算
+#if MD5_USE_NEON
+typedef uint32x4_t bit32x4;
+
+inline bit32x4 MakeVec4(bit32 v0, bit32 v1, bit32 v2, bit32 v3)
+{
+	const uint32_t lanes[4] = {v0, v1, v2, v3};
+	return vld1q_u32(lanes);
+}
+
+inline bit32x4 Broadcast4(bit32 v)
+{
+	return vdupq_n_u32(v);
+}
+
+inline bit32x4 RotateLeft4(bit32x4 num, int n)
+{
+	const int32x4_t left = vdupq_n_s32(n);
+	const int32x4_t right = vdupq_n_s32(n - 32);
+	return vorrq_u32(vshlq_u32(num, left), vshlq_u32(num, right));
+}
+
+inline bit32x4 F4(bit32x4 x, bit32x4 y, bit32x4 z)
+{
+	return vbslq_u32(x, y, z);
+}
+
+inline bit32x4 G4(bit32x4 x, bit32x4 y, bit32x4 z)
+{
+	return vbslq_u32(z, x, y);
+}
+
+inline bit32x4 H4(bit32x4 x, bit32x4 y, bit32x4 z)
+{
+	return veorq_u32(veorq_u32(x, y), z);
+}
+
+inline bit32x4 I4(bit32x4 x, bit32x4 y, bit32x4 z)
+{
+	return veorq_u32(y, vorrq_u32(x, vmvnq_u32(z)));
+}
+
+inline bit32x4 Add4(bit32x4 x, bit32x4 y)
+{
+	return vaddq_u32(x, y);
+}
+
+inline void StoreVec4(bit32x4 v, bit32 out[4])
+{
+	uint32_t lanes[4];
+	vst1q_u32(lanes, v);
+	memcpy(out, lanes, sizeof(bit32) * 4);
+}
+#else
 typedef uint32_t bit32x4 __attribute__((vector_size(16)));
 
 inline bit32x4 MakeVec4(bit32 v0, bit32 v1, bit32 v2, bit32 v3)
@@ -52,33 +112,16 @@ inline bit32x4 I4(bit32x4 x, bit32x4 y, bit32x4 z)
 	return (y ^ (x | (~z)));
 }
 
-inline void FF4(bit32x4 &a, const bit32x4 &b, const bit32x4 &c, const bit32x4 &d, const bit32x4 &x, int s, bit32 ac)
+inline bit32x4 Add4(bit32x4 x, bit32x4 y)
 {
-	a += F4(b, c, d) + x + Broadcast4(ac);
-	a = RotateLeft4(a, s);
-	a += b;
+	return x + y;
 }
 
-inline void GG4(bit32x4 &a, const bit32x4 &b, const bit32x4 &c, const bit32x4 &d, const bit32x4 &x, int s, bit32 ac)
+inline void StoreVec4(bit32x4 v, bit32 out[4])
 {
-	a += G4(b, c, d) + x + Broadcast4(ac);
-	a = RotateLeft4(a, s);
-	a += b;
+	memcpy(out, &v, sizeof(bit32) * 4);
 }
-
-inline void HH4(bit32x4 &a, const bit32x4 &b, const bit32x4 &c, const bit32x4 &d, const bit32x4 &x, int s, bit32 ac)
-{
-	a += H4(b, c, d) + x + Broadcast4(ac);
-	a = RotateLeft4(a, s);
-	a += b;
-}
-
-inline void II4(bit32x4 &a, const bit32x4 &b, const bit32x4 &c, const bit32x4 &d, const bit32x4 &x, int s, bit32 ac)
-{
-	a += I4(b, c, d) + x + Broadcast4(ac);
-	a = RotateLeft4(a, s);
-	a += b;
-}
+#endif
 
 inline bit32 LoadWordLE(const Byte *src)
 {
@@ -96,9 +139,32 @@ inline bit32 ByteSwap32(bit32 value)
 		   ((value & 0xff000000U) >> 24);
 }
 
-inline void StoreVec4(bit32x4 v, bit32 out[4])
+inline void FF4(bit32x4 &a, const bit32x4 &b, const bit32x4 &c, const bit32x4 &d, const bit32x4 &x, int s, bit32 ac)
 {
-	memcpy(out, &v, sizeof(bit32) * 4);
+	a = Add4(Add4(Add4(a, F4(b, c, d)), x), Broadcast4(ac));
+	a = RotateLeft4(a, s);
+	a = Add4(a, b);
+}
+
+inline void GG4(bit32x4 &a, const bit32x4 &b, const bit32x4 &c, const bit32x4 &d, const bit32x4 &x, int s, bit32 ac)
+{
+	a = Add4(Add4(Add4(a, G4(b, c, d)), x), Broadcast4(ac));
+	a = RotateLeft4(a, s);
+	a = Add4(a, b);
+}
+
+inline void HH4(bit32x4 &a, const bit32x4 &b, const bit32x4 &c, const bit32x4 &d, const bit32x4 &x, int s, bit32 ac)
+{
+	a = Add4(Add4(Add4(a, H4(b, c, d)), x), Broadcast4(ac));
+	a = RotateLeft4(a, s);
+	a = Add4(a, b);
+}
+
+inline void II4(bit32x4 &a, const bit32x4 &b, const bit32x4 &c, const bit32x4 &d, const bit32x4 &x, int s, bit32 ac)
+{
+	a = Add4(Add4(Add4(a, I4(b, c, d)), x), Broadcast4(ac));
+	a = RotateLeft4(a, s);
+	a = Add4(a, b);
 }
 
 void MD5RoundsScalar(const bit32 x[16], bit32 &a, bit32 &b, bit32 &c, bit32 &d)

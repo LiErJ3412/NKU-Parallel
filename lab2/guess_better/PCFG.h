@@ -2,6 +2,7 @@
 #include <iostream>
 #include <unordered_map>
 #include <queue>
+#include <omp.h>
 // #include <chrono>   
 // using namespace chrono;
 using namespace std;

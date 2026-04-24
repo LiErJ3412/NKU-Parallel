@@ -139,6 +139,60 @@ inline bit32 ByteSwap32(bit32 value)
 		   ((value & 0xff000000U) >> 24);
 }
 
+inline int PaddedLengthFor(size_t length)
+{
+	size_t remainder = length % 64;
+	size_t paddingBytes = (remainder < 56) ? (56 - remainder) : (120 - remainder);
+	return static_cast<int>(length + paddingBytes + 8);
+}
+
+inline void BuildPaddedBlockWords(const string &input, int paddedLength, int block, bit32 words[16])
+{
+	memset(words, 0, sizeof(bit32) * 16);
+
+	const int length = static_cast<int>(input.length());
+	const int blockStart = block * 64;
+	const int blockEnd = blockStart + 64;
+	const int copyLen = max(0, min(length, blockEnd) - blockStart);
+
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+	for (int i = 0; i < copyLen; ++i)
+	{
+		words[i / 4] |= static_cast<bit32>(static_cast<Byte>(input[blockStart + i])) << ((i % 4) * 8);
+	}
+#else
+	if (copyLen > 0)
+	{
+		memcpy(words, input.data() + blockStart, copyLen);
+	}
+#endif
+
+	if (length >= blockStart && length < blockEnd)
+	{
+		const int local = length - blockStart;
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+		words[local / 4] |= static_cast<bit32>(0x80) << ((local % 4) * 8);
+#else
+		reinterpret_cast<Byte *>(words)[local] = 0x80;
+#endif
+	}
+
+	const int lengthStart = paddedLength - 8;
+	if (lengthStart >= blockStart && lengthStart < blockEnd)
+	{
+		const uint64_t bitLength = static_cast<uint64_t>(length) * 8;
+		for (int i = 0; i < 8; ++i)
+		{
+			const int local = lengthStart + i - blockStart;
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+			words[local / 4] |= static_cast<bit32>((bitLength >> (i * 8)) & 0xff) << ((local % 4) * 8);
+#else
+			reinterpret_cast<Byte *>(words)[local] = static_cast<Byte>((bitLength >> (i * 8)) & 0xff);
+#endif
+		}
+	}
+}
+
 inline void FF4(bit32x4 &a, const bit32x4 &b, const bit32x4 &c, const bit32x4 &d, const bit32x4 &x, int s, bit32 ac)
 {
 	a = Add4(Add4(Add4(a, F4(b, c, d)), x), Broadcast4(ac));
@@ -326,7 +380,7 @@ void MD5RoundsSIMD(const bit32x4 x[16], bit32x4 &a, bit32x4 &b, bit32x4 &c, bit3
  * @param[out] n_byte 用于给调用者传递额外的返回值，即最终Byte数组的长度
  * @return Byte消息数组
  */
-Byte *StringProcess(string input, int *n_byte)
+Byte *StringProcess(const string &input, int *n_byte)
 {
 	// 将输入的字符串转换为Byte为单位的数组
 	Byte *blocks = (Byte *)input.c_str();
@@ -394,7 +448,7 @@ Byte *StringProcess(string input, int *n_byte)
  * @param[out] state 用于给调用者传递额外的返回值，即最终的缓冲区，也就是MD5的结果
  * @return Byte消息数组
  */
-void MD5Hash(string input, bit32 *state)
+void MD5Hash(const string &input, bit32 *state)
 {
 	int messageLength = 0;
 	Byte *paddedMessage = StringProcess(input, &messageLength);
@@ -448,7 +502,7 @@ void MD5Hash(string input, bit32 *state)
 void MD5HashSIMD(const vector<string> &inputs, vector<bit32> &states)
 {
 	// 扁平输出：第i个口令的4个state写在states[i*4 ... i*4+3]
-	states.assign(inputs.size() * 4, 0);
+	states.resize(inputs.size() * 4);
 	if (inputs.empty())
 	{
 		return;
@@ -458,15 +512,61 @@ void MD5HashSIMD(const vector<string> &inputs, vector<bit32> &states)
 	{
 		// 固定4路分组，不足4路时只启用前laneCount个lane
 		const int laneCount = static_cast<int>(min<size_t>(4, inputs.size() - base));
-		Byte *paddedMessages[4] = {0, 0, 0, 0};
 		int messageLengths[4] = {0, 0, 0, 0};
 		int nBlocks[4] = {0, 0, 0, 0};
 
 		for (int lane = 0; lane < laneCount; ++lane)
 		{
-			// 每个lane独立做padding，保留原StringProcess逻辑不变
-			paddedMessages[lane] = StringProcess(inputs[base + lane], &messageLengths[lane]);
+			// 直接按MD5 padding规则计算虚拟消息长度，避免为每个口令new/delete padded buffer
+			messageLengths[lane] = PaddedLengthFor(inputs[base + lane].length());
 			nBlocks[lane] = messageLengths[lane] / 64;
+		}
+
+		if (nBlocks[0] == 1 && (laneCount < 2 || nBlocks[1] == 1) &&
+			(laneCount < 3 || nBlocks[2] == 1) && (laneCount < 4 || nBlocks[3] == 1))
+		{
+			bit32 laneWords[4][16];
+			for (int lane = 0; lane < laneCount; ++lane)
+			{
+				BuildPaddedBlockWords(inputs[base + lane], messageLengths[lane], 0, laneWords[lane]);
+			}
+			for (int lane = laneCount; lane < 4; ++lane)
+			{
+				memset(laneWords[lane], 0, sizeof(bit32) * 16);
+			}
+
+			bit32x4 x[16];
+			for (int w = 0; w < 16; ++w)
+			{
+				x[w] = MakeVec4(laneWords[0][w], laneWords[1][w], laneWords[2][w], laneWords[3][w]);
+			}
+
+			bit32x4 a = Broadcast4(0x67452301);
+			bit32x4 b = Broadcast4(0xefcdab89);
+			bit32x4 c = Broadcast4(0x98badcfe);
+			bit32x4 d = Broadcast4(0x10325476);
+
+			MD5RoundsSIMD(x, a, b, c, d);
+
+			a = Add4(a, Broadcast4(0x67452301));
+			b = Add4(b, Broadcast4(0xefcdab89));
+			c = Add4(c, Broadcast4(0x98badcfe));
+			d = Add4(d, Broadcast4(0x10325476));
+
+			bit32 aOut[4], bOut[4], cOut[4], dOut[4];
+			StoreVec4(a, aOut);
+			StoreVec4(b, bOut);
+			StoreVec4(c, cOut);
+			StoreVec4(d, dOut);
+
+			for (int lane = 0; lane < laneCount; ++lane)
+			{
+				states[(base + lane) * 4] = ByteSwap32(aOut[lane]);
+				states[(base + lane) * 4 + 1] = ByteSwap32(bOut[lane]);
+				states[(base + lane) * 4 + 2] = ByteSwap32(cOut[lane]);
+				states[(base + lane) * 4 + 3] = ByteSwap32(dOut[lane]);
+			}
+			continue;
 		}
 
 		bit32 laneState[4][4];
@@ -486,28 +586,24 @@ void MD5HashSIMD(const vector<string> &inputs, vector<bit32> &states)
 
 		for (int block = 0; block < maxBlocks; ++block)
 		{
-			// 将4个口令当前block的第w个32-bit字打包成一个向量x[w]
+			// 先在栈上构造每个lane的padded block，再打包成SIMD向量
+			bit32 laneWords[4][16];
+			for (int lane = 0; lane < laneCount; ++lane)
+			{
+				if (block < nBlocks[lane])
+				{
+					BuildPaddedBlockWords(inputs[base + lane], messageLengths[lane], block, laneWords[lane]);
+				}
+			}
+			for (int lane = laneCount; lane < 4; ++lane)
+			{
+				memset(laneWords[lane], 0, sizeof(bit32) * 16);
+			}
+
 			bit32x4 x[16];
 			for (int w = 0; w < 16; ++w)
 			{
-				bit32 w0 = 0, w1 = 0, w2 = 0, w3 = 0;
-				if (laneCount > 0 && block < nBlocks[0])
-				{
-					w0 = LoadWordLE(&paddedMessages[0][block * 64 + w * 4]);
-				}
-				if (laneCount > 1 && block < nBlocks[1])
-				{
-					w1 = LoadWordLE(&paddedMessages[1][block * 64 + w * 4]);
-				}
-				if (laneCount > 2 && block < nBlocks[2])
-				{
-					w2 = LoadWordLE(&paddedMessages[2][block * 64 + w * 4]);
-				}
-				if (laneCount > 3 && block < nBlocks[3])
-				{
-					w3 = LoadWordLE(&paddedMessages[3][block * 64 + w * 4]);
-				}
-				x[w] = MakeVec4(w0, w1, w2, w3);
+				x[w] = MakeVec4(laneWords[0][w], laneWords[1][w], laneWords[2][w], laneWords[3][w]);
 			}
 
 			// 读取4个lane当前state并执行一次SIMD轮函数
@@ -544,7 +640,6 @@ void MD5HashSIMD(const vector<string> &inputs, vector<bit32> &states)
 			{
 				states[(base + lane) * 4 + i] = ByteSwap32(laneState[lane][i]);
 			}
-			delete[] paddedMessages[lane];
 		}
 	}
 }
